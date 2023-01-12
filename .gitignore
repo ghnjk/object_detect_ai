@@ -1,0 +1,6 @@
+*.pyc
+data
+.ipynb_checkpoints
+log
+.DS_store
+.idea
