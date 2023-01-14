@@ -112,21 +112,21 @@ class TinySSD(object):
             box_masks = keras.Input(shape=(self.all_anchor_count, 4), name="box_masks")
             self.inputs = [x, box_masks]
         # vgg 16 tuning
-        # vgg16 = tf.keras.applications.VGG16(weights="imagenet",
-        #                                     input_shape=(self.image_row_count, self.image_col_count,
-        #                                                  self.image_channel_count),
-        #                                     include_top=False)
-        # for layer in vgg16.layers:
-        #     if layer.name.startswith("input"):
-        #         continue
-        #     layer.trainable = False
-        #     x = layer(x)
-        #     if layer.output_shape[1] <= 64:
-        #         x = tf.stop_gradient(x)
-        #         break
+        vgg16 = tf.keras.applications.VGG16(weights="imagenet",
+                                            input_shape=(self.image_row_count, self.image_col_count,
+                                                         self.image_channel_count),
+                                            include_top=False)
+        for layer in vgg16.layers:
+            if layer.name.startswith("input"):
+                continue
+            layer.trainable = False
+            x = layer(x)
+            if layer.output_shape[1] <= 64:
+                x = tf.stop_gradient(x)
+                break
         with tf.name_scope("image_pre_procsess"):
-            x = self.add_down_sample_blk(x, 16)  # 128, 128, 16
-            x = self.add_down_sample_blk(x, 32)  # 64, 64, 32
+            # x = self.add_down_sample_blk(x, 16)  # 128, 128, 16
+            # x = self.add_down_sample_blk(x, 32)  # 64, 64, 32
             x = self.add_down_sample_blk(x, 64)  # 32, 32, 64
         with tf.name_scope("layer_1_anchors"):
             self.anchor_pred_layers.append(
@@ -260,7 +260,7 @@ class TinySSD(object):
                 if cls <= 0:
                     # 背景
                     continue
-                if np.max(cls_pred) < 0.5:
+                if np.max(cls_pred) < 0.7:
                     continue
                 # print(f"predict_prob {np.max(cls_pred)} anchor: {self.all_anchors[j]} box_offset_red {box_offset_red}")
                 predict_classes.append(cls)
