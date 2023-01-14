@@ -10,3 +10,4 @@ keras==2.9.0
 pandas~=1.4.2
 matplotlib==3.5.1
 matplotlib-inline==0.1.6
+Pillow==9.2.0

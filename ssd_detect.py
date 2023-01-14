@@ -12,37 +12,39 @@ from anchor_box import gen_all_anchors, to_box, DetectAnchorBoxMatcher
 from fit_common.utils import file_util
 from keras.layers import Convolution2D, Activation, MaxPooling2D, BatchNormalization, GlobalMaxPool2D
 from keras.activations import softmax
+from image_augmentation import augmentation_samples
+from keras.callbacks import LearningRateScheduler
 import typing
 
 LAYER_PARAMS = [
     {
         "h": 32,
         "w": 32,
-        "scales": [0.1, 0.2],
+        "scales": [0.2, 0.272],
         "aspect_ratios": [1, 0.5, 2]
     },
     {
         "h": 16,
         "w": 16,
-        "scales": [0.3, 0.4],
+        "scales": [0.37, 0.447],
         "aspect_ratios": [1, 0.5, 2]
     },
     {
         "h": 8,
         "w": 8,
-        "scales": [0.5, 0.6],
+        "scales": [0.54, 0.619],
         "aspect_ratios": [1, 0.5, 2]
     },
     {
         "h": 4,
         "w": 4,
-        "scales": [0.7, 0.8],
+        "scales": [0.71, 0.79],
         "aspect_ratios": [1, 0.5, 2]
     },
     {
         "h": 1,
         "w": 1,
-        "scales": [0.85, 0.95],
+        "scales": [0.88, 0.961],
         "aspect_ratios": [1, 0.5, 2]
     },
 ]
@@ -71,6 +73,15 @@ def tiny_ssd_loss(y_true, y_pred):
     # return cce(y_true[0], y_pred[0]) + mae(y_true[1] * y_true[2], y_pred[1] * y_true[2])
 
 
+def decay_schedule(epoch, lr):
+    # decay by 0.1 every 5 epochs; use `% 1` to decay after each epoch
+    if (epoch % 20 == 0) and (epoch != 0):
+        lr = lr - 1e-3
+        lr = max(lr, 5e-4)
+        print(f"decay learning rate to {lr}")
+    return lr
+
+
 class TinySSD(object):
 
     def __init__(self, image_row_count: int = 256, image_col_count: int = 256, image_channel_count: int = 3,
@@ -86,29 +97,36 @@ class TinySSD(object):
         else:
             self.batch_normal_axis = 1
         self.anchor_pred_layers = []
-        self.all_anchor_count: int = 0
         self.inputs = None
         self.outputs = None
         self.model: typing.Optional[keras.Model] = None
         self.all_anchors = gen_all_anchors(self.image_row_count, self.image_col_count, LAYER_PARAMS)
+        self.all_anchor_count = len(self.all_anchors)
 
     def build_net(self):
-        # 256, 256, 3
-        self.inputs = keras.Input(shape=(self.image_row_count, self.image_col_count, self.image_channel_count),
-                                  name="input_image")
-        vgg16 = tf.keras.applications.VGG16(weights="imagenet",
-                                            input_shape=(self.image_row_count, self.image_col_count,
-                                                         self.image_channel_count),
-                                            include_top=False)
-        x = self.inputs
-        for layer in vgg16.layers:
-            if layer.name.startswith("input"):
-                continue
-            layer.trainable = False
-            x = layer(x)
-            if layer.output_shape[1] <= 64:
-                break
+        with tf.name_scope("inputs"):
+            # 256, 256, 3
+            x = keras.Input(shape=(self.image_row_count, self.image_col_count, self.image_channel_count),
+                            name="input_image")
+            # anchors_count, 4
+            box_masks = keras.Input(shape=(self.all_anchor_count, 4), name="box_masks")
+            self.inputs = [x, box_masks]
+        # vgg 16 tuning
+        # vgg16 = tf.keras.applications.VGG16(weights="imagenet",
+        #                                     input_shape=(self.image_row_count, self.image_col_count,
+        #                                                  self.image_channel_count),
+        #                                     include_top=False)
+        # for layer in vgg16.layers:
+        #     if layer.name.startswith("input"):
+        #         continue
+        #     layer.trainable = False
+        #     x = layer(x)
+        #     if layer.output_shape[1] <= 64:
+        #         x = tf.stop_gradient(x)
+        #         break
         with tf.name_scope("image_pre_procsess"):
+            x = self.add_down_sample_blk(x, 16)  # 128, 128, 16
+            x = self.add_down_sample_blk(x, 32)  # 64, 64, 32
             x = self.add_down_sample_blk(x, 64)  # 32, 32, 64
         with tf.name_scope("layer_1_anchors"):
             self.anchor_pred_layers.append(
@@ -136,10 +154,10 @@ class TinySSD(object):
             )
         self.outputs = self.combine_all_pred_layers()
         self.model = keras.Model(inputs=self.inputs, outputs=self.outputs, name="TinySSD")
-        adam = keras.optimizers.Adam(learning_rate=1e-2)
         self.model.compile(
-            optimizer=adam,
-            loss=["categorical_crossentropy", "mae"])
+            optimizer="rmsprop",
+            loss=["categorical_crossentropy", "mse"]
+        )
         return self.model
 
     def add_down_sample_blk(self, inputs, filter_count: int):
@@ -173,7 +191,6 @@ class TinySSD(object):
         添加锚框预测层
         """
         layer_anchor_count = inputs.shape[1] * inputs.shape[2] * self.anchor_count_per_unit
-        self.all_anchor_count += layer_anchor_count
         cls_pred = Convolution2D(filters=self.anchor_count_per_unit * (self.class_count + 1),
                                  kernel_size=(3, 3),
                                  padding="same")(inputs)
@@ -211,6 +228,8 @@ class TinySSD(object):
         all_box_offset_pred = tf.concat(all_box_offset_pred, axis=1, name="concat_all_layer_offset_pred")
         all_box_offset_pred = tf.reshape(all_box_offset_pred, (-1, self.all_anchor_count, 4),
                                          name="all_box_offset_pred")
+        all_box_offset_pred = tf.math.multiply(all_box_offset_pred,
+                                               self.inputs[1], name="all_box_offset_pred_with_mask")
         return [all_cls_pred, all_box_offset_pred]
 
     def save_model(self, model_path: str = "./data/tiny_ssd.h5"):
@@ -223,7 +242,11 @@ class TinySSD(object):
     def predict(self, images):
         m = DetectAnchorBoxMatcher()
         batch_size = len(images)
-        all_cls_pred, all_box_offset_pred = self.model.predict(np.array(images) / 256.0)
+        inputs = [
+            np.array(images) * 256.0,
+            np.ones(shape=(batch_size, self.all_anchor_count, 4), dtype=np.float32)
+        ]
+        all_cls_pred, all_box_offset_pred = self.model.predict(inputs)
         res = []
         for i in range(batch_size):
             predict_boxes = []
@@ -234,11 +257,12 @@ class TinySSD(object):
                 box_offset_red = all_box_offset_pred[i][j]
                 box = m.anchor_to_label_box(to_box(self.all_anchors[j]), box_offset_red)
                 cls = int(np.argmax(cls_pred))
-                if cls < 0:
+                if cls <= 0:
                     # 背景
                     continue
-                if np.max(cls_pred) < 0.9:
+                if np.max(cls_pred) < 0.5:
                     continue
+                # print(f"predict_prob {np.max(cls_pred)} anchor: {self.all_anchors[j]} box_offset_red {box_offset_red}")
                 predict_classes.append(cls)
                 predict_boxes.append(box)
                 predict_probs.append(np.max(cls_pred))
@@ -272,18 +296,20 @@ class SsdTrainer(object):
         d2l_banana_ds = D2LBananaDatasets()
         self.train_images, self.train_labels = d2l_banana_ds.load_train_dataset()
         self.test_images, self.test_labels = d2l_banana_ds.load_test_dataset()
+        print(f"load {len(self.train_labels)} train cases. {len(self.test_labels)} test cases.")
+        # print("augmentation_samples train cases...")
+        # self.train_images, self.train_labels = augmentation_samples(
+        #     self.train_images, self.train_labels
+        # )
+        # print(f"augmentation_samples gen {len(self.train_labels)} train cases.")
         print("transforming D2LBananaDatasets...")
-        self.train_inputs = np.array(self.train_images) / 256.0
-        self.train_anchors, self.train_outputs = self.convert_to_outputs(self.train_labels)
-        self.test_inputs = np.array(self.test_images) / 256.0
-        self.test_anchors, self.test_outputs = self.convert_to_outputs(self.test_labels)
+        self.train_inputs, self.train_anchors, self.train_outputs = self.convert_to_outputs(self.train_images,
+                                                                                            self.train_labels)
+        self.test_inputs, self.test_anchors, self.test_outputs = self.convert_to_outputs(self.test_images,
+                                                                                         self.test_labels)
         print("prepare datasets ok.")
-        print(f"train input shape: {self.train_inputs.shape} output shape"
-              f" {self.train_outputs[0].shape}, {self.train_outputs[1].shape}")
-        print(f"test input shape: {self.test_inputs.shape} output shape"
-              f" {self.test_outputs[0].shape}, {self.test_outputs[1].shape}")
 
-    def convert_to_outputs(self, labels):
+    def convert_to_outputs(self, images, labels):
         from anchor_box import gen_multi_layer_anchor_sample, to_box
         batch_size = len(labels)
         outputs = [
@@ -303,7 +329,11 @@ class SsdTrainer(object):
             outputs[2].append(box_masks)
         for i in range(len(outputs)):
             outputs[i] = np.array(outputs[i])
-        return np.array(anchors_list), outputs[: -1]
+        inputs = [
+            np.array(images) * 256.0,
+            np.array(outputs[-1])
+        ]
+        return inputs, np.array(anchors_list), outputs[: -1]
 
     def train(self, epoch=128, batch_size=32):
         log_dir = "./log"
@@ -313,5 +343,6 @@ class SsdTrainer(object):
         if self.tiny_ssd is None:
             self.tiny_ssd = TinySSD()
             self.tiny_ssd.build_net()
+        # lr_scheduler = LearningRateScheduler(decay_schedule)
         self.tiny_ssd.model.fit(self.train_inputs, self.train_outputs, batch_size=batch_size, epochs=epoch,
                                 callbacks=[tensorboard_callback])

@@ -144,7 +144,7 @@ class DetectAnchorBoxGenerator(object):
 
 class DetectAnchorBoxMatcher(object):
 
-    def __init__(self, match_iou_threshold=0.3, nms_threshold=0.5):
+    def __init__(self, match_iou_threshold=0.5, nms_threshold=0.5):
         """
         :param match_iou_threshold: 在标注锚框时， 锚框和标注框的iou最小阈值
         :param nms_threshold: 在做预测时，对预测后，所有的预测边框进行mns合并抑制时，需要抑制的iou阈值
@@ -171,9 +171,19 @@ class DetectAnchorBoxMatcher(object):
             for j in range(len(label_boxes)):
                 iou_map[i][j] = anchors[i].calc_iou(label_boxes[j])
         max_iou_idx = np.argmax(iou_map, axis=1)
+        all_cls_max_item = {}
         for i in range(len(anchors)):
             idx = max_iou_idx[i]
-            if iou_map[i][idx] < self.match_iou_threshold:
+            cls = idx + 1
+            iou = iou_map[i][idx]
+            if cls not in all_cls_max_item or all_cls_max_item[cls]["iou"] < iou:
+                all_cls_max_item[cls] = {
+                    "iou": iou,
+                    "cls": cls,
+                    "i": i,
+                    "box_offsets": self.calc_box_offset(anchors[i], label_boxes[idx])
+                }
+            if iou < self.match_iou_threshold:
                 class_labels[i] = 0
                 box_masks[i] = [0.0] * 4
                 box_offsets[i] = (0, 0, 0, 0)
@@ -181,6 +191,13 @@ class DetectAnchorBoxMatcher(object):
                 class_labels[i] = idx + 1
                 box_masks[i] = [1.0] * 4
                 box_offsets[i] = self.calc_box_offset(anchors[i], label_boxes[idx])
+        for key in all_cls_max_item.keys():
+            item = all_cls_max_item[key]
+            i = item["i"]
+            class_labels[i] = item["cls"]
+            box_masks[i] = [1.0] * 4
+            box_offsets[i] = item["box_offsets"]
+            # print(f"nms max cls {key} i {i}")
         return box_offsets, box_masks, class_labels
 
     def calc_box_offset(self, anchor: Box, label_box: Box) -> typing.Tuple:
@@ -194,6 +211,9 @@ class DetectAnchorBoxMatcher(object):
         wa, ha = anchor.size()
         xb, yb = label_box.center()
         wb, hb = label_box.size()
+        xa, ya, wa, ha = np.array([xa, ya, wa, ha]) / 256.0
+        xb, yb, wb, hb = np.array([xb, yb, wb, hb]) / 256.0
+        # return (xb - xa) / 256.0 * 10, (yb - ya) / 256.0 * 10, (wb - wa) / 256.0 * 10, (hb - ha) / 256.0 * 10
         return 10 * (xb - xa) / wa, 10 * (yb - ya) / ha, 5 * (math.log(wb / wa + eps)), 5 * (math.log(hb / ha + eps))
 
     def anchor_to_label_box(self, anchor: Box, box_offset) -> Box:
@@ -206,11 +226,22 @@ class DetectAnchorBoxMatcher(object):
         xa, ya = anchor.center()
         wa, ha = anchor.size()
         xo, yo, wo, ho = box_offset
+        xa, ya, wa, ha = np.array([xa, ya, wa, ha]) / 256.0
+        # xb = xo * 256.0 / 10 + xa
+        # yb = yo * 256.0 / 10 + ya
+        # wb = wo * 256.0 / 10 + wa
+        # hb = ho * 256.0 / 10 + ha
         xb = 0.1 * xo * wa + xa
         yb = 0.1 * yo * ha + ya
         wb = math.pow(math.e, 0.2 * wo) * wa
         hb = math.pow(math.e, 0.2 * ho) * ha
-        return Box(xb - wb / 2.0, yb - hb / 2.0, xb + wb / 2.0, yb + hb / 2.0)
+        # return Box(xb - wb / 2.0, yb - hb / 2.0, xb + wb / 2.0, yb + hb / 2.0)
+        b = Box(xb - wb / 2.0, yb - hb / 2.0, xb + wb / 2.0, yb + hb / 2.0)
+        b.min_x *= 256.0
+        b.max_x *= 256.0
+        b.min_y *= 256.0
+        b.max_y *= 256.0
+        return b
 
     def nms_predict_boxes(self, predict_boxes: typing.List[Box], predict_probs: typing.List[float],
                           predict_classes: typing.List[int]):
@@ -284,15 +315,17 @@ def gen_multi_layer_anchor_sample(height, width, label_boxes: typing.List[Box], 
     box_offsets_list = []
     box_masks_list = []
     class_labels_list = []
+    anchor_boxes_list = []
     for param in layer_params:
         anchors = g.batch_generate(height, width, param["h"], param["w"], param["scales"], param["aspect_ratios"])
         anchor_boxes = [to_box(i) for i in anchors.reshape((-1, 4))]
-        box_offsets, box_masks, class_labels = m.match_label_boxes(anchor_boxes, label_boxes)
         anchors_list.append(anchors.reshape((-1, 4)))
-        box_offsets_list.append(np.array(box_offsets))
-        box_masks_list.append(np.array(box_masks))
-        class_labels = to_category(class_labels, len(label_boxes) + 1)
-        class_labels_list.append(class_labels)
+        anchor_boxes_list.extend(anchor_boxes)
+    box_offsets, box_masks, class_labels = m.match_label_boxes(anchor_boxes_list, label_boxes)
+    box_offsets_list.append(np.array(box_offsets))
+    box_masks_list.append(np.array(box_masks))
+    class_labels = to_category(class_labels, len(label_boxes) + 1)
+    class_labels_list.append(class_labels)
     return (
         np.concatenate(anchors_list, axis=0),
         np.concatenate(box_offsets_list, axis=0),
