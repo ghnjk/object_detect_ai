@@ -211,8 +211,6 @@ class DetectAnchorBoxMatcher(object):
         wa, ha = anchor.size()
         xb, yb = label_box.center()
         wb, hb = label_box.size()
-        xa, ya, wa, ha = np.array([xa, ya, wa, ha]) / 256.0
-        xb, yb, wb, hb = np.array([xb, yb, wb, hb]) / 256.0
         # return (xb - xa) / 256.0 * 10, (yb - ya) / 256.0 * 10, (wb - wa) / 256.0 * 10, (hb - ha) / 256.0 * 10
         return 10 * (xb - xa) / wa, 10 * (yb - ya) / ha, 5 * (math.log(wb / wa + eps)), 5 * (math.log(hb / ha + eps))
 
@@ -226,7 +224,6 @@ class DetectAnchorBoxMatcher(object):
         xa, ya = anchor.center()
         wa, ha = anchor.size()
         xo, yo, wo, ho = box_offset
-        xa, ya, wa, ha = np.array([xa, ya, wa, ha]) / 256.0
         # xb = xo * 256.0 / 10 + xa
         # yb = yo * 256.0 / 10 + ya
         # wb = wo * 256.0 / 10 + wa
@@ -236,12 +233,7 @@ class DetectAnchorBoxMatcher(object):
         wb = math.pow(math.e, 0.2 * wo) * wa
         hb = math.pow(math.e, 0.2 * ho) * ha
         # return Box(xb - wb / 2.0, yb - hb / 2.0, xb + wb / 2.0, yb + hb / 2.0)
-        b = Box(xb - wb / 2.0, yb - hb / 2.0, xb + wb / 2.0, yb + hb / 2.0)
-        b.min_x *= 256.0
-        b.max_x *= 256.0
-        b.min_y *= 256.0
-        b.max_y *= 256.0
-        return b
+        return Box(xb - wb / 2.0, yb - hb / 2.0, xb + wb / 2.0, yb + hb / 2.0)
 
     def nms_predict_boxes(self, predict_boxes: typing.List[Box], predict_probs: typing.List[float],
                           predict_classes: typing.List[int]):

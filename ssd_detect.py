@@ -262,7 +262,6 @@ class TinySSD(object):
                     continue
                 if np.max(cls_pred) < 0.7:
                     continue
-                # print(f"predict_prob {np.max(cls_pred)} anchor: {self.all_anchors[j]} box_offset_red {box_offset_red}")
                 predict_classes.append(cls)
                 predict_boxes.append(box)
                 predict_probs.append(np.max(cls_pred))
